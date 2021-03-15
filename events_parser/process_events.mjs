@@ -107,7 +107,7 @@ var addOwnerMappings = async function(events, db, connection, marketMeta) {
     };
 }
 
-var insertStringEvents = function(events, marketMeta, loadTimestamp, db) {
+var insertStringEvents = function(events, marketEventsLength, marketMeta, loadTimestamp, db) {
 
     let insertSQL = 'INSERT INTO string_events (address, programId, raw_event, parsed_event, loadTimestamp) values (?, ?, ?, ?, ?)'
         
@@ -145,6 +145,15 @@ var insertStringEvents = function(events, marketMeta, loadTimestamp, db) {
     insertEvents(events, marketMeta);
 
     log('Inserted ' + events.length + ' events strings', INFO_LEVEL, marketMeta);
+
+    // events older than the last event in the most recent API call can't be used for matching - delete them to save space
+    let eventCount = db.prepare('SELECT count(*) as eventCount FROM string_events WHERE address = ? and programId = ?').get(marketMeta['address'], marketMeta['programId'])['eventCount'];
+    let numEventsToDelete = eventCount - marketEventsLength;
+    
+    console.log('Deleting ' + numEventsToDelete + ' events strings');
+
+    let deleteSQL = 'DELETE FROM string_events WHERE id IN (SELECT id FROM string_events WHERE address = ? and programId = ? ORDER BY id ASC LIMIT ?)';
+    db.prepare(deleteSQL).run(marketMeta['address'], marketMeta['programId'], numEventsToDelete);
 
 }
 
@@ -234,9 +243,11 @@ var main = async function() {
 
     // Remove deprecated items
     markets = markets.filter((item, i, ar) => !item['deprecated']);
+    
 
     for (var i = 0; i < markets.length; i++) {
         console.log(i);
+
         let marketMeta = markets[i];
         
         marketMeta['baseCurrency'] = marketMeta['name'].split('/')[0];
@@ -257,6 +268,9 @@ var main = async function() {
         let loadTimestamp = new Date().toISOString();
         let events = await market.loadEventQueue(connection, 1000000);
 
+        let marketEventsLength = events.length; 
+        console.log(marketEventsLength);
+
         log('Pulling event queue at ' + loadTimestamp, INFO_LEVEL, marketMeta);
 
         let queueOffset = getQueueOffset(events, marketMeta, db);
@@ -266,8 +280,12 @@ var main = async function() {
         await addOwnerMappings(newEvents, db, connection, marketMeta);
         insertCurrencyMeta(marketMeta, db);
 
-        insertEvents(newEvents, marketMeta, loadTimestamp, db);
-        insertStringEvents(newEvents, marketMeta, loadTimestamp, db);
+        // Only insert filled events to save space
+        let filledEvents = newEvents.filter((item, i, ar) => item.eventFlags['fill']);
+        insertEvents(filledEvents, marketMeta, loadTimestamp, db);
+        
+        // Insert all events for more convenient matching
+        insertStringEvents(newEvents, marketEventsLength, marketMeta, loadTimestamp, db);
 
         await new Promise(resolve => setTimeout(resolve, waitTime));
 
